@@ -1,4 +1,4 @@
-# 📱 IPA Builder by i2sac
+# 📱 IPA Builder
 
 **Author:** [i2sac](https://github.com/i2sac)
 
