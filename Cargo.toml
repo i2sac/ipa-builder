@@ -1,0 +1,35 @@
+[package]
+name = "ipa_builder"
+version = "0.1.0"
+edition = "2021"
+authors = ["i2sac <your_email_for_cargo_toml@example.com>"] # Please update your email here
+
+[dependencies]
+eframe = "0.27.2"
+egui = "0.27.2"
+serde = { version = "1.0", features = ["derive"] }
+serde_json = "1.0"
+zip = "0.6.6" # Using a specific recent version for zip crate
+uuid = { version = "1.7.0", features = ["v4", "serde"] }
+chrono = { version = "0.4.31", features = ["serde"] }
+native-dialog = "0.7.0"
+directories-next = "2.0.0"
+tempfile = "3.10.1"
+log = "0.4.20"
+env_logger = "0.11.3"
+thiserror = "1.0.56" # For custom errors
+walkdir = "2.5.0" # For recursively adding directories to zip
+egui_extras = "0.27.2" # For table support (table module included by default)
+image = { version = "0.25.0", default-features = false, features = ["png"] } # For loading icon image
+
+# For later: HTTP client for sending metrics
+# reqwest = { version = "0.12", features = ["json", "blocking"] } # or async
+
+# For later: Installer related dependencies might be added here or handled by cargo-bundle like tools
+# e.g. for Windows:
+# [target.'cfg(windows)'.build-dependencies]
+# winres = "0.1"
+
+[build-dependencies]
+# For Windows icon, if needed later
+# winres = "0.1"
