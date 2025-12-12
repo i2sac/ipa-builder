@@ -16,6 +16,26 @@ pub struct AutoCheckConfig {
     pub output_ipa_name: String,
 }
 
+fn delete_source_zip_with_retry(path: &Path, max_wait: Duration) -> Result<(), String> {
+    let start = std::time::Instant::now();
+    while start.elapsed() < max_wait {
+        match std::fs::remove_file(path) {
+            Ok(()) => return Ok(()),
+            Err(e) => {
+                let msg = e.to_string();
+                thread::sleep(Duration::from_millis(250));
+                if !path.exists() {
+                    return Ok(());
+                }
+                if start.elapsed() >= max_wait {
+                    return Err(msg);
+                }
+            }
+        }
+    }
+    Err("timeout".to_string())
+}
+
 #[derive(Debug, Clone)]
 pub enum AutoCheckMessage {
     Status(String),
@@ -121,6 +141,22 @@ impl AutoCheckRunner {
                                         "Generated: {}",
                                         out.display()
                                     )));
+
+                                    match delete_source_zip_with_retry(&path, Duration::from_secs(5)) {
+                                        Ok(()) => {
+                                            let _ = tx.send(AutoCheckMessage::Status(format!(
+                                                "Deleted source: {}",
+                                                path.display()
+                                            )));
+                                        }
+                                        Err(e) => {
+                                            let _ = tx.send(AutoCheckMessage::Status(format!(
+                                                "Generated but failed to delete source {}: {}",
+                                                path.display(),
+                                                e
+                                            )));
+                                        }
+                                    }
                                 }
                                 Err(e) => {
                                     let _ = tx.send(AutoCheckMessage::Status(format!(
