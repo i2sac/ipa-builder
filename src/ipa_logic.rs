@@ -31,6 +31,8 @@ pub enum IpaError {
     MoveToPayloadFailed(PathBuf),
     #[error("Final IPA file name is invalid: {0}")]
     InvalidIpaName(String),
+    #[error("Generated IPA has invalid structure: {0}")]
+    InvalidIpaStructure(String),
 }
 
 
@@ -98,16 +100,22 @@ pub fn generate_ipa(config: &AppConfig, output_dir: &Path) -> Result<PathBuf, Ip
     log::info!("Copied '{}' to '{}'", app_bundle_to_payload.file_name().unwrap_or_default().to_string_lossy(), dest_app_path_in_payload.display());
 
     // 6. Compress the `Payload` directory into a new .zip file.
-    let ipa_file_name_str = format!("{}.ipa", config.app_name);
+    let ipa_file_name_str = config.output_ipa_name.trim().to_string();
+    if ipa_file_name_str.is_empty() || !ipa_file_name_str.to_lowercase().ends_with(".ipa") {
+        return Err(IpaError::InvalidIpaName(ipa_file_name_str));
+    }
     if ipa_file_name_str.contains('/') || ipa_file_name_str.contains('\\') {
         return Err(IpaError::InvalidIpaName(ipa_file_name_str));
     }
     let final_ipa_path = output_dir.join(&ipa_file_name_str);
     let ipa_file = File::create(&final_ipa_path)?;
     let mut zip_writer = zip::ZipWriter::new(ipa_file);
-    let options = FileOptions::default()
-        .compression_method(zip::CompressionMethod::Deflated)
+    let dir_options = FileOptions::default()
+        .compression_method(zip::CompressionMethod::Stored)
         .unix_permissions(0o755);
+    let file_options_default = FileOptions::default()
+        .compression_method(zip::CompressionMethod::Deflated)
+        .unix_permissions(0o644);
 
     log::info!("Starting compression of Payload directory to {}", final_ipa_path.display());
     let walkdir_base = ipa_build_temp_dir.path(); // Base for stripping prefix
@@ -117,23 +125,100 @@ pub fn generate_ipa(config: &AppConfig, output_dir: &Path) -> Result<PathBuf, Ip
         let path = entry_result.path();
         // Path in zip should be relative to *inside* ipa_build_temp_dir, e.g., "Payload/AppName.app/file"
         let name_in_zip = path.strip_prefix(walkdir_base).unwrap(); 
-        
+
+        let zip_entry_name = zip_name_from_relative_path(name_in_zip, path.is_dir());
+        if zip_entry_name.is_empty() {
+            continue;
+        }
+
         if path.is_file() {
-            log::trace!("Adding file to zip: {:?} as {:?}", path, name_in_zip);
-            zip_writer.start_file(name_in_zip.to_string_lossy().into_owned(), options)?;
             let mut f = File::open(path)?;
             f.read_to_end(&mut buffer)?;
+
+            let perm = unix_permissions_for_payload_file(path, &buffer);
+            let file_options = file_options_default.unix_permissions(perm);
+
+            log::trace!("Adding file to zip: {:?} as {}", path, zip_entry_name);
+            zip_writer.start_file(zip_entry_name, file_options)?;
             zip_writer.write_all(&buffer)?;
             buffer.clear();
-        } else if !name_in_zip.as_os_str().is_empty() { 
-            log::trace!("Adding directory to zip: {:?} as {:?}", path, name_in_zip);
-            zip_writer.add_directory(name_in_zip.to_string_lossy().into_owned(), options)?;
+        } else {
+            log::trace!("Adding directory to zip: {:?} as {}", path, zip_entry_name);
+            zip_writer.add_directory(zip_entry_name, dir_options)?;
         }
     }
     zip_writer.finish()?;
     log::info!("Successfully created IPA: {}", final_ipa_path.display());
 
+    validate_generated_ipa(&final_ipa_path)?;
+
     Ok(final_ipa_path)
+}
+
+fn validate_generated_ipa(ipa_path: &Path) -> Result<(), IpaError> {
+    let ipa_file = File::open(ipa_path)?;
+    let mut archive = zip::ZipArchive::new(ipa_file)?;
+
+    let mut found_plist = false;
+    for i in 0..archive.len() {
+        let file = archive.by_index(i)?;
+        let name = file.name();
+
+        if name.starts_with("Payload/") && name.ends_with(".app/Info.plist") {
+            found_plist = true;
+            break;
+        }
+    }
+
+    if !found_plist {
+        return Err(IpaError::InvalidIpaStructure(
+            "Missing Payload/<App>.app/Info.plist".to_string(),
+        ));
+    }
+
+    Ok(())
+}
+
+fn zip_name_from_relative_path(relative_path: &Path, is_dir: bool) -> String {
+    let mut s = relative_path
+        .components()
+        .map(|c| c.as_os_str().to_string_lossy())
+        .collect::<Vec<_>>()
+        .join("/");
+
+    if is_dir {
+        if !s.is_empty() && !s.ends_with('/') {
+            s.push('/');
+        }
+    }
+
+    s
+}
+
+fn unix_permissions_for_payload_file(file_path: &Path, file_bytes: &[u8]) -> u32 {
+    if is_macho(file_bytes) {
+        return 0o755;
+    }
+    if matches!(file_path.extension().and_then(|e| e.to_str()), Some("dylib")) {
+        return 0o755;
+    }
+    0o644
+}
+
+fn is_macho(bytes: &[u8]) -> bool {
+    if bytes.len() < 4 {
+        return false;
+    }
+    let magic = u32::from_be_bytes([bytes[0], bytes[1], bytes[2], bytes[3]]);
+    matches!(
+        magic,
+        0xFEEDFACE
+            | 0xFEEDFACF
+            | 0xCAFEBABE
+            | 0xBEBAFECA
+            | 0xCEFAEDFE
+            | 0xCFFAEDFE
+    )
 }
 
 fn copy_dir_all(src: impl AsRef<Path>, dst: impl AsRef<Path>) -> std::io::Result<()> {
