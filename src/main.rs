@@ -1,4 +1,5 @@
 mod app;
+mod autocheck;
 mod ipa_logic;
 mod metrics;
 mod config_utils;

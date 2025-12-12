@@ -21,6 +21,7 @@ thiserror = "1.0.56" # For custom errors
 walkdir = "2.5.0" # For recursively adding directories to zip
 egui_extras = "0.27.2" # For table support (table module included by default)
 image = { version = "0.25.0", default-features = false, features = ["png"] } # For loading icon image
+notify = "6.1.1"
 
 # For later: HTTP client for sending metrics
 # reqwest = { version = "0.12", features = ["json", "blocking"] } # or async

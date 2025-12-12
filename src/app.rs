@@ -5,6 +5,7 @@ use std::path::PathBuf;
 
 use crate::config_utils::{get_data_dir_path};
 use crate::metrics::{MetricEvent, MetricsCollector};
+use crate::autocheck::{AutoCheckConfig, AutoCheckMessage, AutoCheckRunner};
 use egui_extras::{Column, TableBuilder};
 
 #[derive(Serialize, Deserialize, Debug, Clone)]
@@ -46,9 +47,185 @@ pub struct IpaBuilderApp {
 
     #[serde(skip)]
     last_generated_ipa_path: Option<PathBuf>,
+
+    autocheck_watch_dir: Option<String>,
+    autocheck_app_name: String,
+    autocheck_output_ipa_name: String,
+    autocheck_output_directory: Option<String>,
+
+    #[serde(skip)]
+    autocheck_runner: Option<AutoCheckRunner>,
+    #[serde(skip)]
+    autocheck_log: Vec<String>,
 }
 
 impl IpaBuilderApp {
+
+    fn poll_autocheck_messages(&mut self) {
+        if let Some(runner) = &self.autocheck_runner {
+            while let Some(msg) = runner.try_recv() {
+                match msg {
+                    AutoCheckMessage::Status(s) => {
+                        self.status_message = s.clone();
+                        self.autocheck_log.push(s);
+                        if self.autocheck_log.len() > 200 {
+                            let drain = self.autocheck_log.len() - 200;
+                            self.autocheck_log.drain(0..drain);
+                        }
+                    }
+                }
+            }
+        }
+    }
+
+    fn autocheck_is_running(&self) -> bool {
+        self.autocheck_runner.is_some()
+    }
+
+    fn start_autocheck(&mut self) {
+        let watch_dir = match self.autocheck_watch_dir.as_ref().map(|s| s.trim()).filter(|s| !s.is_empty()) {
+            Some(s) => PathBuf::from(s),
+            None => {
+                self.status_message = "AutoCheck: please select a watch directory.".to_string();
+                return;
+            }
+        };
+
+        let output_dir_string = self
+            .autocheck_output_directory
+            .clone()
+            .or_else(|| self.output_directory.clone());
+
+        let output_dir = match output_dir_string.as_ref().map(|s| s.trim()).filter(|s| !s.is_empty()) {
+            Some(s) => PathBuf::from(s),
+            None => {
+                self.status_message = "AutoCheck: please configure an output directory.".to_string();
+                return;
+            }
+        };
+
+        let cfg = AutoCheckConfig {
+            watch_dir,
+            output_dir,
+            app_name: self.autocheck_app_name.trim().to_string(),
+            output_ipa_name: self.autocheck_output_ipa_name.trim().to_string(),
+        };
+
+        match AutoCheckRunner::start(cfg) {
+            Ok(runner) => {
+                self.autocheck_runner = Some(runner);
+                self.status_message = "AutoCheck started.".to_string();
+            }
+            Err(e) => {
+                self.status_message = format!("AutoCheck error: {}", e);
+            }
+        }
+    }
+
+    fn stop_autocheck(&mut self) {
+        if let Some(mut runner) = self.autocheck_runner.take() {
+            runner.stop();
+        }
+        self.status_message = "AutoCheck stopped.".to_string();
+    }
+
+    fn render_autocheck_ui(&mut self, ui: &mut egui::Ui) {
+        ui.push_id("autocheck_section", |ui| {
+            ui.separator();
+            ui.heading("AutoCheck");
+
+            let running = self.autocheck_is_running();
+
+            ui.horizontal(|ui| {
+                ui.label("Watch folder:");
+                let watch_display = self.autocheck_watch_dir.clone().unwrap_or_default();
+                let mut editable = watch_display;
+                ui.add_enabled_ui(!running, |ui| {
+                    ui.text_edit_singleline(&mut editable);
+                    if ui.button("Browse...").clicked() {
+                        match native_dialog::FileDialog::new().show_open_single_dir() {
+                            Ok(Some(path)) => {
+                                self.autocheck_watch_dir = Some(path.to_string_lossy().to_string());
+                            }
+                            Ok(None) => {}
+                            Err(e) => {
+                                self.status_message = format!("Error opening directory dialog: {:?}", e);
+                            }
+                        }
+                    } else {
+                        if editable.trim().is_empty() {
+                            self.autocheck_watch_dir = None;
+                        } else {
+                            self.autocheck_watch_dir = Some(editable);
+                        }
+                    }
+                });
+            });
+
+            ui.horizontal(|ui| {
+                ui.label("Output folder:");
+                let output_display = self.autocheck_output_directory.clone().unwrap_or_default();
+                let mut editable = output_display;
+                ui.add_enabled_ui(!running, |ui| {
+                    ui.text_edit_singleline(&mut editable);
+                    if ui.button("Browse...").clicked() {
+                        match native_dialog::FileDialog::new().show_open_single_dir() {
+                            Ok(Some(path)) => {
+                                self.autocheck_output_directory = Some(path.to_string_lossy().to_string());
+                            }
+                            Ok(None) => {}
+                            Err(e) => {
+                                self.status_message = format!("Error opening directory dialog: {:?}", e);
+                            }
+                        }
+                    } else {
+                        if editable.trim().is_empty() {
+                            self.autocheck_output_directory = None;
+                        } else {
+                            self.autocheck_output_directory = Some(editable);
+                        }
+                    }
+                });
+            });
+
+            ui.horizontal(|ui| {
+                ui.label("App name:");
+                ui.add_enabled_ui(!running, |ui| {
+                    ui.text_edit_singleline(&mut self.autocheck_app_name);
+                });
+            });
+
+            ui.horizontal(|ui| {
+                ui.label("Output IPA:");
+                ui.add_enabled_ui(!running, |ui| {
+                    ui.text_edit_singleline(&mut self.autocheck_output_ipa_name);
+                });
+            });
+
+            ui.horizontal(|ui| {
+                if !running {
+                    if ui.button("Start").clicked() {
+                        self.start_autocheck();
+                    }
+                } else {
+                    if ui.button("Stop").clicked() {
+                        self.stop_autocheck();
+                    }
+                }
+            });
+
+            ui.label(format!("Status: {}", if running { "Running" } else { "Stopped" }));
+
+            egui::ScrollArea::vertical()
+                .id_source("autocheck_log_scroll")
+                .max_height(120.0)
+                .show(ui, |ui| {
+                    for line in self.autocheck_log.iter().rev().take(50) {
+                        ui.label(line);
+                    }
+                });
+        });
+    }
     pub fn post_load_setup(&mut self, _cc: &eframe::CreationContext<'_>) {
         log::info!("IpaBuilderApp::post_load_setup called.");
         self.metrics_collector = MetricsCollector::new(get_data_dir_path().expect("Failed to get data dir for metrics post-load").join("metrics.jsonl"));
@@ -80,6 +257,13 @@ impl Default for IpaBuilderApp {
             show_delete_confirm_for_idx: None,
             generating_app_idx: None,
             last_generated_ipa_path: None,
+
+            autocheck_watch_dir: None,
+            autocheck_app_name: "AutoCheckApp".to_string(),
+            autocheck_output_ipa_name: "AutoCheckApp.ipa".to_string(),
+            autocheck_output_directory: None,
+            autocheck_runner: None,
+            autocheck_log: Vec::new(),
         }
     }
 }
@@ -95,9 +279,15 @@ impl eframe::App for IpaBuilderApp {
                     log::error!("Failed to serialize app state: {}", e);
                 }
             }
+
+            if let Some(mut runner) = self.autocheck_runner.take() {
+                runner.stop();
+            }
         }
 
     fn update(&mut self, ctx: &egui::Context, _frame: &mut eframe::Frame) {
+        self.poll_autocheck_messages();
+
         if self.output_directory.is_none() {
             self.show_config_dialog = true;
         }
@@ -170,6 +360,10 @@ impl IpaBuilderApp {
                 ui.label("Search:");
                 ui.text_edit_singleline(&mut self.search_query);
             });
+            ui.separator();
+
+            self.render_autocheck_ui(ui);
+
             ui.separator();
 
             let lower_search_query = self.search_query.to_lowercase();
